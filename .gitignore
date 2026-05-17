@@ -70,6 +70,8 @@ yarn-error.log*
 frontend/dist/
 frontend/.vite/
 frontend/coverage/
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo
 
 # Logs
 logs/
