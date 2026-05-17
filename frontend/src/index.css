@@ -1,0 +1,19 @@
+@import "@xyflow/react/dist/style.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+.cursor-blink::after {
+  content: "_";
+  animation: blink 1s steps(2) infinite;
+}
+
+@keyframes blink {
+  to { opacity: 0; }
+}
