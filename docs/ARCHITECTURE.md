@@ -2,7 +2,7 @@
 
 | Field       | Value                                      |
 |-------------|--------------------------------------------|
-| Version     | 0.2 — ADRs resolved                       |
+| Version     | 0.3 — Database strategy staged            |
 | Status      | **PENDING APPROVAL**                       |
 | Date        | 2026-05-24                                 |
 | Owner       | VTAL Engineering                          |
@@ -262,19 +262,23 @@ Calling providers directly (current Phase 1–3 approach) creates coupling: mode
 |------|------|---------|-----|-------|----------|
 | L1 | In-Context | LLM context window | Request | Per-agent | Active conversation, immediate reasoning |
 | L2 | Working Memory | Cloud Memorystore (Redis 7) | Run lifetime | Per-run | Shared scratchpad between agents in a squad session |
-| L3 | Episodic Memory | AlloyDB | Indefinite | Per-project | Past runs, decisions made, outcomes, errors |
-| L4 | Semantic Memory | AlloyDB pgvector + Vertex AI Vector Search | Indefinite | Per-project | Embeddings of code, docs, architecture patterns |
-| L5 | Org/Project Context | AlloyDB | Indefinite | Per-org / Per-project | Tech stack conventions, team standards, open tasks, decision log |
+| L3 | Episodic Memory | Cloud SQL PostgreSQL → AlloyDB (Phase 3) | Indefinite | Per-project | Past runs, decisions made, outcomes, errors |
+| L4 | Semantic Memory | Cloud SQL pgvector → AlloyDB pgvector (Phase 3) | Indefinite | Per-project | Embeddings of code, docs, architecture patterns |
+| L5 | Org/Project Context | Cloud SQL PostgreSQL → AlloyDB (Phase 3) | Indefinite | Per-org / Per-project | Tech stack conventions, team standards, open tasks, decision log |
 
 #### Technology Choices
 
 | Component | Product | Vendor | Justification |
 |-----------|---------|--------|---------------|
-| Working Memory (L2) | Cloud Memorystore for Redis 7 | Google Cloud | Sub-millisecond reads, TTL native, Redis data structures (lists, hashes, sorted sets) map cleanly to conversation buffers and run state |
-| Episodic + Semantic (L3/L4/L5) | AlloyDB for PostgreSQL | Google Cloud | PostgreSQL-compatible (uses existing SQLModel/Alembic), built-in pgvector extension for vector similarity, Cloud SQL Auth Proxy for IAM auth, no separate vector DB to operate |
+| Working Memory (L2) | Cloud Memorystore for Redis 7 | Google Cloud | Sub-millisecond reads, TTL native, Redis data structures map cleanly to conversation buffers and run state |
+| Episodic + Semantic — Phase 1–2 (L3/L4/L5) | Cloud SQL for PostgreSQL + pgvector | Google Cloud | ~50% cheaper than AlloyDB at low volume; same wire protocol, same Alembic migrations, same pgvector extension — zero schema changes needed when upgrading |
+| Episodic + Semantic — Phase 3+ (L3/L4/L5) | AlloyDB for PostgreSQL | Google Cloud | Justified once vector query volume and combined SQL+vector queries become performance-sensitive; 4× transactional throughput, optimized pgvector extension, shared HA storage |
+| Migration path | Database Migration Service (GCP) | Google Cloud | One-time, online migration from Cloud SQL → AlloyDB; no downtime, no code changes |
 | Embedding Model | `text-embedding-004` via Vertex AI | Google Cloud | Native GCP, 768-dim embeddings, optimized for code + text |
 
-#### AlloyDB Schema (Memory Tables)
+#### Database Schema (Memory Tables)
+
+> Schema is identical for Cloud SQL (Phase 1–2) and AlloyDB (Phase 3+). pgvector is available on both.
 
 ```sql
 -- Episodic: structured run history
@@ -314,9 +318,19 @@ CREATE TABLE project_context (
 );
 ```
 
-#### Rationale: AlloyDB over Vertex AI Vector Search
+#### Rationale: Staged Database Strategy
 
-Vertex AI Vector Search (Matching Engine) is purpose-built for billion-scale ANN search with very low latency. For the Software Factory use case, however, queries frequently combine structured filters with vector similarity (`find similar past bugs WHERE resolved = true AND component = 'payments'`). AlloyDB with pgvector handles this natively in SQL. We should migrate to Vertex Vector Search only when pgvector index rebuild times or query latency become bottlenecks (typically >50M vectors).
+**Phase 1–2 — Cloud SQL PostgreSQL + pgvector:**
+Cloud SQL is ~50% cheaper than AlloyDB at low volume. At 5 squad runs/day the performance delta is irrelevant. Using Cloud SQL from the start avoids paying for headroom that won't be used for months. The schema, ORM (SQLModel/Alembic), driver (asyncpg), and pgvector extension are **identical** — the migration to AlloyDB is a GCP Database Migration Service job, not a code change.
+
+**Phase 3+ trigger to migrate → AlloyDB:**
+Migrate when any of these thresholds are hit:
+- pgvector IVFFlat index rebuild exceeds 5 minutes
+- Vector query P95 latency exceeds 100ms
+- Combined SQL+vector query volume exceeds ~500K/day
+- Daily squad usage makes AlloyDB's 4× transactional throughput meaningful
+
+**Vertex AI Vector Search:** Not in scope until embeddings corpus exceeds ~50M chunks (billions-scale ANN). pgvector handles everything before that point.
 
 ---
 
@@ -666,9 +680,10 @@ with tracer.start_as_current_span("agent.step", attributes={
 | L1 | Fallback | OpenAI GPT-4o | OpenAI | Provider redundancy |
 | L1 | Local/Private | Ollama | Meta / OSS | Air-gapped use cases |
 | L2 | Working Memory | Cloud Memorystore for Redis 7 | Google Cloud | <1ms reads, TTL native |
-| L2 | Episodic Memory | AlloyDB for PostgreSQL | Google Cloud | SQL + pgvector unified |
-| L2 | Semantic Memory | AlloyDB pgvector | Google Cloud | Same DB, vector index |
-| L2 | Org Context | AlloyDB for PostgreSQL | Google Cloud | Structured project state |
+| L2 | Episodic Memory (Ph 1–2) | Cloud SQL for PostgreSQL + pgvector | Google Cloud | ~50% cheaper than AlloyDB; identical schema |
+| L2 | Episodic Memory (Ph 3+) | AlloyDB for PostgreSQL | Google Cloud | Migrate via DMS when volume justifies cost |
+| L2 | Semantic Memory | pgvector (on Cloud SQL → AlloyDB) | Google Cloud | Same DB, same index, no migration needed |
+| L2 | Org Context | Cloud SQL → AlloyDB (Phase 3) | Google Cloud | Migrates with the rest of the DB |
 | L2 | Embedding Model | text-embedding-004 (Vertex AI) | Google Cloud | 768-dim, code-optimized |
 | L3 | Tool Protocol | MCP (Model Context Protocol) | Anthropic OSS | Claude-native standard |
 | L3 | Tool Runtime | Cloud Run | Google Cloud | Per-tool containerized service |
@@ -694,7 +709,8 @@ with tracer.start_as_current_span("agent.step", attributes={
 | L9 | Alerting | Cloud Monitoring → PagerDuty | Google / PagerDuty | On-call escalation |
 | Infra | Container Serverless | Cloud Run | Google Cloud | Tools, agents, gateway |
 | Infra | Container Persistent | GKE Autopilot | Google Cloud | Squad Manager, bus consumers |
-| Infra | Database | AlloyDB for PostgreSQL | Google Cloud | All structured + vector data |
+| Infra | Database (Ph 1–2) | Cloud SQL for PostgreSQL + pgvector | Google Cloud | ~50% cheaper; identical schema to AlloyDB |
+| Infra | Database (Ph 3+) | AlloyDB for PostgreSQL | Google Cloud | Migrate via DMS when performance thresholds hit |
 | Infra | Cache | Cloud Memorystore Redis 7 | Google Cloud | Working memory, budget counters |
 | Infra | Object Storage | Cloud Storage (GCS) | Google Cloud | Execution artifacts, snapshots |
 | Infra | CI/CD | GitHub Actions + Cloud Build | GitHub / Google | Build, test, deploy pipeline |
@@ -739,7 +755,12 @@ GCP Project: vtal-agentstudio-prod
 │       └── eval-pipeline             ← Periodic quality evaluation
 │
 ├── Data
-│   ├── AlloyDB Cluster (us-east1)
+│   ├── Cloud SQL for PostgreSQL (us-east1)   ← Phase 1–2
+│   │   ├── Primary instance (HA)     ← Read/write
+│   │   └── Read replica              ← Analytics / eval queries
+│   │   └── [Migrate → AlloyDB in Phase 3 via Database Migration Service]
+│   │
+│   ├── AlloyDB Cluster (us-east1)            ← Phase 3+
 │   │   ├── Primary instance          ← Read/write
 │   │   └── Read replica              ← Analytics / eval queries
 │   │
@@ -806,9 +827,9 @@ GCP Project: vtal-agentstudio-prod
 
 ### Data Flows
 
-**Execution path (hot):** API → AlloyDB (run create) → Redis (context write) → LiteLLM → AlloyDB (step update) → SSE → Frontend
+**Execution path (hot):** API → Cloud SQL/AlloyDB (run create) → Redis (context write) → LiteLLM → Cloud SQL/AlloyDB (step update) → SSE → Frontend
 
-**Memory retrieval (hot):** Agent → AlloyDB pgvector similarity search → Top-K chunks → Injected into LLM context
+**Memory retrieval (hot):** Agent → pgvector similarity search (Cloud SQL Ph1–2 / AlloyDB Ph3+) → Top-K chunks → Injected into LLM context
 
 **Audit path (cold):** Cloud Logging → BigQuery daily export → Looker Studio (cost attribution + exec reports)
 
@@ -902,7 +923,7 @@ IaC is organized as Terraform modules:
 | Deliverable | Details |
 |-------------|---------|
 | LiteLLM Gateway | Deploy on Cloud Run; wire all existing providers through it; add budget tracking |
-| AlloyDB | Migrate from SQLite/PostgreSQL to AlloyDB; run Alembic migrations; validate existing tests |
+| Cloud SQL PostgreSQL | Migrate from SQLite to Cloud SQL (asyncpg); run Alembic migrations; validate existing tests; pgvector extension enabled |
 | Cloud Memorystore | Deploy Redis instance; wire as L2 working memory in executor |
 | Terraform baseline | IaC for all Phase 1 infrastructure |
 | OTEL tracing | Instrument FastAPI backend + LiteLLM with OpenTelemetry → Cloud Trace |
@@ -938,6 +959,7 @@ IaC is organized as Terraform modules:
 | HITL gates | Human approval nodes wired for task approval, PR review, and deploy |
 | Remaining tools | `cloud_build_tool`, `test_runner_tool`, `diagram_tool` |
 | LLMOps Dashboard | Activate Agent Platform native dashboard; wire LiteLLM OTEL → Cloud Trace; Looker Studio cost report |
+| AlloyDB migration | Migrate Cloud SQL → AlloyDB via Database Migration Service if performance thresholds hit (pgvector P95 >100ms or index rebuild >5min); zero code changes required |
 | End-to-end test | Full squad run: "implement a new REST endpoint" from requirement to PR |
 
 **Exit criteria:** Squad autonomously takes a GitHub issue from "To Do" to "PR Ready" with human review only at the HITL gates.
@@ -953,7 +975,7 @@ IaC is organized as Terraform modules:
 | AlloyDB read replica | Offload analytics/eval queries |
 | Multi-squad support | AgentStudio supports multiple concurrent squads |
 | Eval pipeline | Automated quality scoring of agent outputs |
-| DR plan | AlloyDB cross-region replica + runbook for failover |
+| DR plan | Cross-region replica (Cloud SQL or AlloyDB depending on phase) + failover runbook |
 | Load testing | Simulate 10 concurrent squad runs; validate cost and latency |
 | Security audit | External penetration test |
 
@@ -963,11 +985,15 @@ IaC is organized as Terraform modules:
 
 Estimates assume moderate usage (5 squad runs/day, average 50 steps/run, mixed models).
 
+Estimates assume moderate usage (5 squad runs/day, average 50 steps/run, mixed models).
+
+#### Phase 1–2 (Cloud SQL)
+
 | Component | GCP Service | Estimated Monthly Cost |
 |-----------|------------|----------------------|
 | LLM calls (Vertex AI — Claude Sonnet) | Vertex AI | ~$800–2,000 |
 | LLM calls (Vertex AI — Gemini Flash) | Vertex AI | ~$50–150 |
-| AlloyDB (2 vCPU, 16GB, 1 replica) | AlloyDB | ~$400–600 |
+| Cloud SQL PostgreSQL (2 vCPU, 16GB HA + replica) | Cloud SQL | ~$200–300 |
 | Cloud Memorystore Redis (2GB) | Memorystore | ~$80–120 |
 | Cloud Run (all services, min-instances=1) | Cloud Run | ~$150–300 |
 | GKE Autopilot (squad-manager + consumers) | GKE | ~$200–400 |
@@ -975,13 +1001,24 @@ Estimates assume moderate usage (5 squad runs/day, average 50 steps/run, mixed m
 | Cloud Build (CI minutes) | Cloud Build | ~$30–80 |
 | Cloud Storage | GCS | ~$10–20 |
 | Observability (Logging, Monitoring, Trace) | Ops Suite | ~$50–100 |
-| **Total (moderate usage)** | | **~$1,780–3,800/month** |
+| **Total Phase 1–2** | | **~$1,580–3,500/month** |
+
+#### Phase 3+ (AlloyDB — after migration)
+
+| Component | GCP Service | Delta vs Phase 1–2 |
+|-----------|------------|---------------------|
+| AlloyDB (2 vCPU, 16GB, 1 replica) | AlloyDB | +~$150–250/month vs Cloud SQL |
+| **Total Phase 3+** | | **~$1,730–3,750/month** |
+
+> Storage on AlloyDB is ~2× Cloud SQL per GB. Watch this line as knowledge embeddings grow. Set a Cloud Monitoring alert at 200GB stored.
 
 **Cost Controls in Place:**
 - LiteLLM per-run budget caps (hard abort)
 - Cloud Run min-instances=0 for non-critical services
 - Gemini Flash for classification/routing tasks (10–20x cheaper than Sonnet)
 - BigQuery cost attribution reports for per-squad, per-project billing
+- AlloyDB Committed Use Discount: 25% (1-year) or 52% (3-year) — apply after Phase 3 stabilises
+- Storage alert at 200GB to trigger embedding strategy review before costs scale non-linearly
 
 ---
 
@@ -999,6 +1036,7 @@ These are architectural questions that need a decision before or during implemen
 | ADR-006 | Human authentication provider | (A) Google Identity Platform, (B) Auth0, (C) custom | **(A) — follow recommendation.** Google Identity Platform: GCP-native, IAP integration, no extra vendor, SSO with VTAL Google Workspace | **Decided** |
 | ADR-007 | LLMOps dashboard: Grafana self-hosted vs. native GCP | (A) Grafana on Cloud Run, (B) native GCP stack | **(B) native GCP stack.** Gemini Enterprise Agent Platform has a built-in observability dashboard (token usage, latency, error rates, tool calls, Unified Trace Viewer). LiteLLM exports to Cloud Trace via OTEL. Looker Studio covers cost attribution. No Grafana needed — eliminates one operational dependency | **Decided** |
 | ADR-008 | When to enable Vertex AI Vector Search (scale threshold) | Trigger: pgvector index rebuild >5min OR query P95 >100ms | Documented threshold; no change needed in v1 | **Decided** |
+| ADR-009 | Database: Cloud SQL vs AlloyDB — when to migrate | (A) AlloyDB from day one, (B) Cloud SQL Phase 1–2 → AlloyDB Phase 3+ | **(B) staged.** AlloyDB storage is 2× Cloud SQL and compute ~39% higher. At low volume the premium is unjustifiable. Cloud SQL + pgvector is identical in schema and driver — migration is a GCP DMS job, not a code change. Trigger: pgvector P95 >100ms OR index rebuild >5min OR daily run volume makes performance delta meaningful | **Decided** |
 
 ---
 
