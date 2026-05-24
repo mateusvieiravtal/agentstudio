@@ -2,7 +2,7 @@
 
 | Field       | Value                                      |
 |-------------|--------------------------------------------|
-| Version     | 0.1 — Draft for Approval                  |
+| Version     | 0.2 — ADRs resolved                       |
 | Status      | **PENDING APPROVAL**                       |
 | Date        | 2026-05-24                                 |
 | Owner       | VTAL Engineering                          |
@@ -609,13 +609,17 @@ Before any agent output is committed to GitHub:
 
 | Component | Product | What It Covers |
 |-----------|---------|---------------|
-| Distributed Tracing | Cloud Trace + OpenTelemetry SDK | Request trace across all agents and tools in a run |
-| Metrics | Cloud Monitoring + custom metrics | Infra (CPU, memory, latency) + LLMOps (token rate, cost, error rate) |
+| Agent Dashboard | Gemini Enterprise Agent Platform (native) | Token usage, latency, error rates, tool call counts per agent — built-in, no config needed |
+| Unified Trace Viewer | Agent Platform native | Visualize full sequence of agent actions, tool calls, and routing decisions per run |
+| Distributed Tracing | Cloud Trace + OpenTelemetry SDK | Cross-service spans: FastAPI → LiteLLM → Vertex AI → Tools |
+| LiteLLM Metrics | LiteLLM OTEL exporter → Cloud Trace | Per-model token cost, latency, error rate from the gateway layer |
+| Infrastructure Metrics | Cloud Monitoring + custom metrics | CPU, memory, latency for Cloud Run / GKE / AlloyDB / Redis |
 | Logging | Cloud Logging (structured JSON) | All agent actions, tool calls, A2A messages — already structured in codebase |
-| Log Analytics | BigQuery (Log Sink) | Long-term analysis, cost attribution, anomaly detection |
-| LLMOps Dashboard | Custom (Grafana or Looker Studio) | Token cost per squad/agent, model latency P50/P95, hallucination flags |
+| Cost Analytics | BigQuery (Log Sink) + Looker Studio | Long-term cost attribution per squad/project; custom exec dashboards |
 | Alerting | Cloud Monitoring Alert Policies → PagerDuty | Cost overruns, error rate spikes, DLQ messages, failed runs |
 | Eval | Offline eval pipeline (Cloud Run Jobs) | Periodic quality scoring of agent outputs against golden dataset |
+
+> **ADR-007 — Decided:** The Gemini Enterprise Agent Platform provides a native observability dashboard (token usage, latency, error rates, tool calls, Unified Trace Viewer) that covers agent-level LLMOps out of the box. LiteLLM exports to Cloud Trace via OTEL. Combined with Cloud Monitoring for infrastructure and Looker Studio for cost analytics, this eliminates the need for self-hosted Grafana. Decision: **native GCP observability stack only**.
 
 #### Key Custom Metrics
 
@@ -652,7 +656,7 @@ with tracer.start_as_current_span("agent.step", attributes={
 
 | Layer | Component | Product | Vendor | Notes |
 |-------|-----------|---------|--------|-------|
-| L0 | Agent Registry | GCP Agent Platform / Vertex AI Agent Builder | Google Cloud | Native A2A support |
+| L0 | Agent Registry | Gemini Enterprise Agent Platform (Vertex AI Agent Builder) | Google Cloud | Native A2A support, built-in observability |
 | L0 | Agent Identity | Workload Identity Federation | Google Cloud | No static keys |
 | L0 | Secrets | Secret Manager | Google Cloud | Versioned, audited |
 | L1 | LLM Router | LiteLLM (self-hosted) | OSS on Cloud Run | Model-agnostic, budget tracking |
@@ -685,7 +689,8 @@ with tracer.start_as_current_span("agent.step", attributes={
 | L9 | Metrics | Cloud Monitoring | Google Cloud | Infrastructure + custom |
 | L9 | Logging | Cloud Logging (structured JSON) | Google Cloud | Already in codebase |
 | L9 | Log Analytics | BigQuery (Log Sink) | Google Cloud | Cost attribution |
-| L9 | Dashboard | Grafana (self-hosted on Cloud Run) | OSS | LLMOps + Infra |
+| L9 | Agent Dashboard | Gemini Enterprise Agent Platform (native) | Google Cloud | Token, latency, error rate, tool calls |
+| L9 | Cost Analytics | BigQuery + Looker Studio | Google Cloud | Per-squad/project cost attribution |
 | L9 | Alerting | Cloud Monitoring → PagerDuty | Google / PagerDuty | On-call escalation |
 | Infra | Container Serverless | Cloud Run | Google Cloud | Tools, agents, gateway |
 | Infra | Container Persistent | GKE Autopilot | Google Cloud | Squad Manager, bus consumers |
@@ -722,7 +727,7 @@ GCP Project: vtal-agentstudio-prod
 │   │   ├── tool-github               ← GitHub MCP tool
 │   │   ├── tool-search               ← Web/docs search tool
 │   │   ├── tool-build                ← Cloud Build trigger tool
-│   │   └── agentstudio-frontend      ← React SPA (static)
+│   │   └── agentstudio-frontend      ← React SPA (Nginx container, Cloud Run)
 │   │
 │   ├── Cloud Run Jobs
 │   │   ├── code-executor-sandbox     ← Ephemeral code execution
@@ -743,7 +748,7 @@ GCP Project: vtal-agentstudio-prod
 │   └── Cloud Storage
 │       ├── gs://agentstudio-artifacts ← Code execution outputs
 │       ├── gs://agentstudio-backups   ← AlloyDB backups
-│       └── gs://agentstudio-frontend  ← Frontend static files
+│       └── gs://agentstudio-frontend  ← Frontend build cache / CDN assets
 │
 ├── Messaging
 │   ├── Pub/Sub Topics
@@ -757,7 +762,7 @@ GCP Project: vtal-agentstudio-prod
 ├── ML / AI
 │   ├── Vertex AI Model Garden        ← Gemini + Claude (partner)
 │   ├── Vertex AI Vector Search       ← Future: scale beyond pgvector
-│   └── Vertex AI Agent Builder       ← Agent registry
+│   └── Gemini Enterprise Agent Platform  ← Agent registry + native observability
 │
 ├── Security
 │   ├── Secret Manager                ← API keys, DB passwords
@@ -766,10 +771,12 @@ GCP Project: vtal-agentstudio-prod
 │   └── VPC Service Controls          ← Data perimeter
 │
 └── Observability
-    ├── Cloud Trace                   ← Distributed tracing
-    ├── Cloud Monitoring              ← Metrics + alerts
-    ├── Cloud Logging                 ← Structured logs
-    └── BigQuery (Log Sink)           ← Long-term log analytics
+    ├── Gemini Enterprise Agent Platform  ← Native LLMOps dashboard (token, latency, tools, traces)
+    ├── Cloud Trace                       ← Distributed tracing (OTEL + LiteLLM export)
+    ├── Cloud Monitoring                  ← Infrastructure metrics + alert policies
+    ├── Cloud Logging                     ← Structured logs (JSON, all services)
+    ├── BigQuery (Log Sink)               ← Long-term log analytics + cost attribution
+    └── Looker Studio                     ← Exec-facing cost + quality reports
 ```
 
 **Regions:** Primary `us-east1`. Disaster recovery: `us-central1` (AlloyDB cross-region replica only in v1).
@@ -803,7 +810,7 @@ GCP Project: vtal-agentstudio-prod
 
 **Memory retrieval (hot):** Agent → AlloyDB pgvector similarity search → Top-K chunks → Injected into LLM context
 
-**Audit path (cold):** Cloud Logging → BigQuery daily export → Looker Studio / Grafana dashboard
+**Audit path (cold):** Cloud Logging → BigQuery daily export → Looker Studio (cost attribution + exec reports)
 
 ---
 
@@ -930,7 +937,7 @@ IaC is organized as Terraform modules:
 | All 8 squad agents | Deploy with role-specific skill configs and tool permissions |
 | HITL gates | Human approval nodes wired for task approval, PR review, and deploy |
 | Remaining tools | `cloud_build_tool`, `test_runner_tool`, `diagram_tool` |
-| LLMOps Dashboard | Grafana dashboard: cost, latency, error rate, per-agent |
+| LLMOps Dashboard | Activate Agent Platform native dashboard; wire LiteLLM OTEL → Cloud Trace; Looker Studio cost report |
 | End-to-end test | Full squad run: "implement a new REST endpoint" from requirement to PR |
 
 **Exit criteria:** Squad autonomously takes a GitHub issue from "To Do" to "PR Ready" with human review only at the HITL gates.
@@ -984,13 +991,13 @@ These are architectural questions that need a decision before or during implemen
 
 | # | Question | Options | Recommendation | Status |
 |---|----------|---------|----------------|--------|
-| ADR-001 | GCP Agent Platform maturity vs. custom registry | (A) GCP Agent Platform, (B) custom Firestore service | (A) — avoids maintenance burden; evaluate maturity in Phase 1 | **Open** |
-| ADR-002 | AlloyDB pgvector vs. Vertex AI Vector Search for L4 | (A) pgvector (same DB), (B) Vertex Vector Search (dedicated) | (A) until >10M vectors or <50ms query SLA required | **Decided** |
+| ADR-001 | GCP Agent Platform maturity vs. custom registry | (A) GCP Agent Platform, (B) custom Firestore service | **(A) — follow recommendation.** Avoids registry maintenance; Agent Platform now rebranded as Gemini Enterprise Agent Platform (Cloud Next 2026) with stable APIs | **Decided** |
+| ADR-002 | AlloyDB pgvector vs. Vertex AI Vector Search for L4 | (A) pgvector (same DB), (B) Vertex Vector Search (dedicated) | (A) until >10M vectors or pgvector query P95 >100ms | **Decided** |
 | ADR-003 | Squad-per-GKE-namespace vs. squad-per-Cloud-Run-service | (A) GKE namespaces, (B) Cloud Run per agent type | (A) for stateful squad manager; (B) for stateless tools | **Decided** |
 | ADR-004 | LiteLLM self-hosted vs. LiteLLM Proxy managed service | (A) Self-hosted on Cloud Run, (B) LiteLLM Cloud | (A) — data residency control, no vendor lock for gateway | **Decided** |
-| ADR-005 | Frontend hosting: Cloud Run vs. Firebase Hosting vs. GCS+CDN | (A) Cloud Run, (B) Firebase Hosting, (C) GCS + Cloud CDN | (B) Firebase Hosting — simpler, built-in CDN, GCP-native | **Open** |
-| ADR-006 | Human authentication provider | (A) Google Identity Platform, (B) Auth0, (C) custom | (A) — GCP-native, IAP integration, no extra vendor | **Open** |
-| ADR-007 | Grafana self-hosted vs. Looker Studio for LLMOps dashboard | (A) Grafana on Cloud Run, (B) Looker Studio | (A) — richer LLMOps plugins, custom panels | **Open** |
+| ADR-005 | Frontend hosting: Cloud Run vs. Firebase Hosting vs. GCS+CDN | (A) Cloud Run, (B) Firebase Hosting, (C) GCS + Cloud CDN | **(A) Cloud Run** — consistent with all other services; Nginx container serving Vite build; same VPC + IAP boundary | **Decided** |
+| ADR-006 | Human authentication provider | (A) Google Identity Platform, (B) Auth0, (C) custom | **(A) — follow recommendation.** Google Identity Platform: GCP-native, IAP integration, no extra vendor, SSO with VTAL Google Workspace | **Decided** |
+| ADR-007 | LLMOps dashboard: Grafana self-hosted vs. native GCP | (A) Grafana on Cloud Run, (B) native GCP stack | **(B) native GCP stack.** Gemini Enterprise Agent Platform has a built-in observability dashboard (token usage, latency, error rates, tool calls, Unified Trace Viewer). LiteLLM exports to Cloud Trace via OTEL. Looker Studio covers cost attribution. No Grafana needed — eliminates one operational dependency | **Decided** |
 | ADR-008 | When to enable Vertex AI Vector Search (scale threshold) | Trigger: pgvector index rebuild >5min OR query P95 >100ms | Documented threshold; no change needed in v1 | **Decided** |
 
 ---
