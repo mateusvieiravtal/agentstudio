@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None)
     ollama_base_url: str = Field(default="http://localhost:11434/v1")
 
+    # LiteLLM gateway — set USE_LITELLM=true to route all LLM calls through LiteLLM.
+    # Falls back to direct provider SDKs when false (default for local dev without keys).
+    use_litellm: bool = Field(default=False)
+
+    # L2 working memory — set REDIS_URL to use Redis; omit to use in-process dict.
+    # In-process dict is fine for local single-process dev; Redis is required for
+    # multi-process / multi-instance deployments.
+    redis_url: str | None = Field(default=None)
+
     log_level: str = Field(default="INFO")
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://localhost:3000"]

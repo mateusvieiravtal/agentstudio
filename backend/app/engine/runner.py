@@ -6,6 +6,7 @@ from typing import Any
 
 from app.engine.memory import MessageMemory
 from app.engine.streaming import SSEEmitter
+from app.engine.working_memory import WorkingMemory
 from app.models.agent import Agent, AgentType
 from app.providers import get_provider
 from app.providers.base import LLMProvider
@@ -33,11 +34,13 @@ class AgentRunner:
         run_id: str,
         emitter: SSEEmitter,
         memory: MessageMemory,
+        working_memory: WorkingMemory | None = None,
         provider_factory=get_provider,
     ) -> None:
         self.run_id = run_id
         self.emitter = emitter
         self.memory = memory
+        self.working_memory = working_memory  # available for Phase 2 skill/tool use
         self.provider_factory = provider_factory
 
     async def run(

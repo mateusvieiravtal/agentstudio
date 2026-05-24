@@ -1,0 +1,63 @@
+version: "3.9"
+
+# ── Local dev services ────────────────────────────────────────────────────────
+# Run backend and frontend natively (hot-reload friendly).
+# This compose file provides only the infrastructure services they depend on.
+#
+# Quick start:
+#   docker compose up -d          # start Redis
+#   make dev                      # start backend + frontend in parallel
+#
+# Full-stack in Docker (optional, slower):
+#   docker compose --profile full up
+
+services:
+  # ── L2 Working Memory ───────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Full-stack profiles (optional) ──────────────────────────────────────────
+  backend:
+    profiles: ["full"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:///./agentstudio.db
+      REDIS_URL: redis://redis:6379
+      USE_LITELLM: "false"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LOG_LEVEL: INFO
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - backend_db:/app/data
+
+  frontend:
+    profiles: ["full"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+volumes:
+  redis_data:
+  backend_db:

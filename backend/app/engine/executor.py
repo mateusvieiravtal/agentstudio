@@ -12,6 +12,7 @@ from app.engine.graph import PipelineGraph
 from app.engine.memory import MessageMemory
 from app.engine.runner import AgentRunner, HumanInputRequired
 from app.engine.streaming import SSEEmitter, sse_emitter
+from app.engine.working_memory import WorkingMemory, working_memory as _default_working_memory
 from app.models.agent import Agent
 from app.models.pipeline import Pipeline
 from app.models.run import Run, RunStatus, RunStep, StepStatus
@@ -32,10 +33,12 @@ class PipelineExecutor:
         *,
         emitter: SSEEmitter | None = None,
         runner_factory=None,
+        working_memory: WorkingMemory | None = None,
     ) -> None:
         self.session = session
         self.emitter = emitter or sse_emitter
         self._runner_factory = runner_factory
+        self.working_memory = working_memory or _default_working_memory
 
     async def execute(self, run: Run) -> None:
         pipeline = await self._load_pipeline(run.pipeline_id)
@@ -48,11 +51,15 @@ class PipelineExecutor:
         runner = (self._runner_factory or self._default_runner)(
             run_id=run.id, emitter=self.emitter, memory=memory
         )
+        # Inject working memory after construction so custom runner factories
+        # used in tests don't need to declare the kwarg.
+        runner.working_memory = self.working_memory
 
         run.status = RunStatus.RUNNING
         run.started_at = _now()
         await self._save(run)
         await self.emitter.emit(run.id, "run.started", {"run_id": run.id})
+        await self.working_memory.set(run.id, "run_input", run.input)
 
         current_input = run.input
         try:
@@ -109,6 +116,7 @@ class PipelineExecutor:
 
                 executed_outputs[node_id] = result.output
                 current_input = result.output
+                await self.working_memory.set(run.id, f"step:{node_id}:output", result.output)
 
             run.status = RunStatus.COMPLETED
             run.output = current_input
