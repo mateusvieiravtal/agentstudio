@@ -1,12 +1,22 @@
 from __future__ import annotations
 
-from typing import AsyncIterator
-
-import litellm
+from typing import TYPE_CHECKING, AsyncIterator
 
 from app.providers.base import ChatMessage
 
-litellm.drop_params = True  # silently ignore unsupported kwargs per provider
+if TYPE_CHECKING:
+    import litellm  # noqa: F401 — type-check only
+
+
+def _litellm():
+    try:
+        import litellm as _ll
+        _ll.drop_params = True
+        return _ll
+    except ImportError:
+        raise RuntimeError(
+            "litellm is not installed. Run: uv sync --extra litellm"
+        )
 
 
 _PROVIDER_PREFIX: dict[str, str] = {
@@ -52,7 +62,7 @@ class LiteLLMProvider:
         system: str = "",
         **kwargs,
     ) -> AsyncIterator[str]:
-        response = await litellm.acompletion(
+        response = await _litellm().acompletion(
             model=self._model(model),
             messages=self._build_messages(messages, system),
             stream=True,
@@ -70,7 +80,7 @@ class LiteLLMProvider:
         system: str = "",
         **kwargs,
     ) -> str:
-        response = await litellm.acompletion(
+        response = await _litellm().acompletion(
             model=self._model(model),
             messages=self._build_messages(messages, system),
             **kwargs,

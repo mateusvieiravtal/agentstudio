@@ -24,11 +24,13 @@ dependencies = [
     "openai>=1.54.0",
     "httpx>=0.27.0",
     "python-multipart>=0.0.12",
-    "litellm>=1.52.0",
     "redis[asyncio]>=5.0.0",
 ]
 
 [project.optional-dependencies]
+litellm = [
+    "litellm>=1.52.0",
+]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
